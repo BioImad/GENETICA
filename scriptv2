@@ -1,0 +1,361 @@
+library(ggplot2)
+library(dplyr)
+library(corrplot)
+library(gridExtra)
+
+# Impostazioni base
+data_dir <- "D:/plink_win64_20250615nuovo/"
+
+# Colori per le popolazioni
+colors <- c("IBS" = "blue", "MXL" = "red", "CHB" = "green")
+
+# ===========================
+# 1. ANALISI PCA
+# ===========================
+
+# Carico i dati PCA
+pca_data <- read.table(file.path(data_dir, "IBS_MXL_CHB_PCA.eigenvec"), header = FALSE)
+colnames(pca_data) <- c("FID", "IID", "PC1", "PC2", "PC3", "PC4", "PC5", "PC6", "PC7", "PC8")
+
+# Grafico PCA
+plot1 <- ggplot(pca_data, aes(x = PC1, y = PC2, color = FID)) +
+  geom_point(size = 3) +
+  scale_color_manual(values = colors) +
+  labs(title = "Analisi PCA - PC1 vs PC2", 
+       x = "PC1", y = "PC2", color = "Popolazione") +
+  theme_minimal()
+
+print(plot1)
+
+# Secondo grafico PCA
+plot2 <- ggplot(pca_data, aes(x = PC1, y = PC3, color = FID)) +
+  geom_point(size = 3) +
+  scale_color_manual(values = colors) +
+  labs(title = "Analisi PCA - PC1 vs PC3", 
+       x = "PC1", y = "PC3", color = "Popolazione") +
+  theme_minimal()
+
+print(plot2)
+
+# ===========================
+# 2. ANALISI INBREEDING
+# ===========================
+
+# Carico dati inbreeding
+inbreeding_data <- read.table(file.path(data_dir, "IBS_MXL_CHB_inbreeding.het"), header = TRUE)
+
+# Statistiche per popolazione
+stats_inbreeding <- inbreeding_data %>%
+  group_by(FID) %>%
+  summarise(
+    media_F = mean(F),
+    deviazione_F = sd(F),
+    minimo_F = min(F),
+    massimo_F = max(F)
+  )
+
+print("Statistiche Inbreeding:")
+print(stats_inbreeding)
+
+# Boxplot inbreeding
+plot3 <- ggplot(inbreeding_data, aes(x = FID, y = F, fill = FID)) +
+  geom_boxplot() +
+  scale_fill_manual(values = colors) +
+  labs(title = "Coefficiente di Inbreeding per Popolazione", 
+       x = "Popolazione", y = "Coefficiente F") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+print(plot3)
+
+# ===========================
+# 3. ANALISI FST AVANZATA CON MANHATTAN PLOTS SEPARATI
+# ===========================
+
+# Carico frequenze alleliche
+freq_data <- read.table(file.path(data_dir, "IBS_MXL_CHB_freq.frq.strat"), header = TRUE)
+
+# Separo per popolazione
+IBS_freq <- freq_data[freq_data$CLST == "IBS", ]
+MXL_freq <- freq_data[freq_data$CLST == "MXL", ]
+CHB_freq <- freq_data[freq_data$CLST == "CHB", ]
+
+# Funzione per calcolare Fst tra due popolazioni
+calcola_fst <- function(freq1, freq2) {
+  p1 <- freq1$MAF
+  p2 <- freq2$MAF
+  
+  fst_per_snp <- c()
+  for(i in 1:length(p1)) {
+    if(p1[i] > 0 & p1[i] < 1 & p2[i] > 0 & p2[i] < 1) {
+      p_media <- (p1[i] + p2[i]) / 2
+      ht <- 2 * p_media * (1 - p_media)
+      hs <- (2 * p1[i] * (1 - p1[i]) + 2 * p2[i] * (1 - p2[i])) / 2
+      fst_snp <- (ht - hs) / ht
+      fst_per_snp[i] <- ifelse(fst_snp < 0, 0, fst_snp)  # Evita valori negativi
+    } else {
+      fst_per_snp[i] <- NA
+    }
+  }
+  return(fst_per_snp)
+}
+
+# Calcolo Fst per tutti i confronti
+fst_IBS_MXL <- calcola_fst(IBS_freq, MXL_freq)
+fst_IBS_CHB <- calcola_fst(IBS_freq, CHB_freq)
+fst_MXL_CHB <- calcola_fst(MXL_freq, CHB_freq)
+
+# Valori medi Fst
+fst_medio_IBS_MXL <- mean(fst_IBS_MXL, na.rm = TRUE)
+fst_medio_IBS_CHB <- mean(fst_IBS_CHB, na.rm = TRUE)
+fst_medio_MXL_CHB <- mean(fst_MXL_CHB, na.rm = TRUE)
+
+cat("Valori Fst medi:\n")
+cat("IBS vs MXL:", round(fst_medio_IBS_MXL, 4), "\n")
+cat("IBS vs CHB:", round(fst_medio_IBS_CHB, 4), "\n")
+cat("MXL vs CHB:", round(fst_medio_MXL_CHB, 4), "\n")
+
+# Estraggo posizioni genomiche
+estrai_posizioni <- function(snp_names) {
+  posizioni <- c()
+  for(i in 1:length(snp_names)) {
+    snp_nome <- as.character(snp_names[i])
+    parti <- strsplit(snp_nome, "_")[[1]]
+    if(length(parti) >= 2) {
+      posizioni[i] <- as.numeric(parti[2])
+    } else {
+      posizioni[i] <- i  # Usa indice se non riesce a estrarre posizione
+    }
+  }
+  return(posizioni)
+}
+
+posizioni <- estrai_posizioni(IBS_freq$SNP)
+
+# ===========================
+# MANHATTAN PLOTS SEPARATI PER OGNI CONFRONTO
+# ===========================
+
+# Funzione per creare dataset Manhattan
+crea_manhattan_data <- function(fst_values, cromosomi, posizioni, titolo_confronto) {
+  data <- data.frame(
+    chr = cromosomi,
+    pos = posizioni,
+    fst = fst_values,
+    confronto = titolo_confronto
+  )
+  # Rimuovo valori mancanti
+  data <- data[!is.na(data$fst) & !is.na(data$pos), ]
+  return(data)
+}
+
+# Creo dataset per ogni confronto
+manhattan_IBS_MXL <- crea_manhattan_data(fst_IBS_MXL, IBS_freq$CHR, posizioni, "IBS vs MXL")
+manhattan_IBS_CHB <- crea_manhattan_data(fst_IBS_CHB, IBS_freq$CHR, posizioni, "IBS vs CHB")
+manhattan_MXL_CHB <- crea_manhattan_data(fst_MXL_CHB, IBS_freq$CHR, posizioni, "MXL vs CHB")
+
+# Colori per i cromosomi (alternati)
+colori_cromosomi <- c("darkblue", "lightblue")
+
+# Manhattan Plot 1: IBS vs MXL (Europa vs America)
+plot_manhattan_1 <- ggplot(manhattan_IBS_MXL, aes(x = pos, y = fst)) +
+  geom_point(aes(color = factor(chr %% 2)), alpha = 0.7, size = 0.8) +
+  scale_color_manual(values = colori_cromosomi) +
+  facet_wrap(~ chr, scales = "free_x", ncol = 6) +
+  labs(title = "Manhattan Plot Fst: IBS (Europa) vs MXL (America)", 
+       x = "Posizione Genomica", y = "Fst",
+       subtitle = paste("Fst medio =", round(fst_medio_IBS_MXL, 4))) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    legend.position = "none",
+    strip.text = element_text(size = 8)
+  ) +
+  geom_hline(yintercept = 0.25, linetype = "dashed", color = "red", alpha = 0.7)
+
+print(plot_manhattan_1)
+
+# Manhattan Plot 2: IBS vs CHB (Europa vs Asia)
+plot_manhattan_2 <- ggplot(manhattan_IBS_CHB, aes(x = pos, y = fst)) +
+  geom_point(aes(color = factor(chr %% 2)), alpha = 0.7, size = 0.8) +
+  scale_color_manual(values = colori_cromosomi) +
+  facet_wrap(~ chr, scales = "free_x", ncol = 6) +
+  labs(title = "Manhattan Plot Fst: IBS (Europa) vs CHB (Asia)", 
+       x = "Posizione Genomica", y = "Fst",
+       subtitle = paste("Fst medio =", round(fst_medio_IBS_CHB, 4))) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    legend.position = "none",
+    strip.text = element_text(size = 8)
+  ) +
+  geom_hline(yintercept = 0.25, linetype = "dashed", color = "red", alpha = 0.7)
+
+print(plot_manhattan_2)
+
+# Manhattan Plot 3: MXL vs CHB (America vs Asia)
+plot_manhattan_3 <- ggplot(manhattan_MXL_CHB, aes(x = pos, y = fst)) +
+  geom_point(aes(color = factor(chr %% 2)), alpha = 0.7, size = 0.8) +
+  scale_color_manual(values = colori_cromosomi) +
+  facet_wrap(~ chr, scales = "free_x", ncol = 6) +
+  labs(title = "Manhattan Plot Fst: MXL (America) vs CHB (Asia)", 
+       x = "Posizione Genomica", y = "Fst",
+       subtitle = paste("Fst medio =", round(fst_medio_MXL_CHB, 4))) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    legend.position = "none",
+    strip.text = element_text(size = 8)
+  ) +
+  geom_hline(yintercept = 0.25, linetype = "dashed", color = "red", alpha = 0.7)
+
+print(plot_manhattan_3)
+
+# ===========================
+# TABELLA TOP SNP PER OGNI CONFRONTO
+# ===========================
+
+# Funzione per estrarre top SNP
+estrai_top_snp <- function(manhattan_data, freq_ref, n_top = 5) {
+  top_indices <- order(manhattan_data$fst, decreasing = TRUE)[1:n_top]
+  top_data <- manhattan_data[top_indices, ]
+  
+  # Aggiungo informazioni SNP
+  top_data$SNP <- freq_ref$SNP[match(top_data$pos, posizioni)]
+  top_data$MAF_ref <- freq_ref$MAF[match(top_data$pos, posizioni)]
+  
+  return(top_data[, c("chr", "SNP", "fst", "MAF_ref")])
+}
+
+# Top SNP per ogni confronto
+cat("\n=== TOP 5 SNP CON FST PIÙ ALTO ===\n")
+
+cat("\nIBS vs MXL (Europa vs America):\n")
+top_IBS_MXL <- estrai_top_snp(manhattan_IBS_MXL, IBS_freq)
+print(top_IBS_MXL)
+
+cat("\nIBS vs CHB (Europa vs Asia):\n")
+top_IBS_CHB <- estrai_top_snp(manhattan_IBS_CHB, IBS_freq)
+print(top_IBS_CHB)
+
+cat("\nMXL vs CHB (America vs Asia):\n")
+top_MXL_CHB <- estrai_top_snp(manhattan_MXL_CHB, MXL_freq)
+print(top_MXL_CHB)
+
+# ===========================
+# 4. ANALISI RoH
+# ===========================
+
+# Carico dati Run of Homozygosity
+roh_data <- read.table(file.path(data_dir, "IBS_MXL_CHB_RoH.hom.indiv"), header = TRUE)
+
+# Statistiche RoH
+stats_roh <- roh_data %>%
+  group_by(FID) %>%
+  summarise(
+    media_KB = mean(KB),
+    media_segmenti = mean(NSEG),
+    deviazione_KB = sd(KB)
+  )
+
+print("Statistiche Run of Homozygosity:")
+print(stats_roh)
+
+# Grafico RoH
+plot4 <- ggplot(roh_data, aes(x = FID, y = KB, fill = FID)) +
+  geom_boxplot() +
+  scale_fill_manual(values = colors) +
+  labs(title = "Lunghezza Run of Homozygosity", 
+       x = "Popolazione", y = "Lunghezza totale (KB)") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+print(plot4)
+
+# ===========================
+# 5. CORRELAZIONI
+# ===========================
+
+# Matrice correlazioni tra frequenze
+correlazioni <- cor(cbind(IBS_freq$MAF, MXL_freq$MAF, CHB_freq$MAF))
+colnames(correlazioni) <- c("IBS", "MXL", "CHB")
+rownames(correlazioni) <- c("IBS", "MXL", "CHB")
+
+print("Correlazioni tra frequenze alleliche:")
+print(round(correlazioni, 3))
+
+# Grafico correlazioni
+corrplot(correlazioni, method = "number", type = "upper")
+
+# ===========================
+# 6. GRAFICO COMPARATIVO FST
+# ===========================
+
+# Creo dataset per confronto Fst
+fst_comparison <- data.frame(
+  Confronto = c("IBS vs MXL\n(Europa-America)", 
+                "IBS vs CHB\n(Europa-Asia)", 
+                "MXL vs CHB\n(America-Asia)"),
+  Fst = c(fst_medio_IBS_MXL, fst_medio_IBS_CHB, fst_medio_MXL_CHB),
+  Tipo = c("Inter-continentale", "Inter-continentale", "Inter-continentale")
+)
+
+plot_fst_comparison <- ggplot(fst_comparison, aes(x = reorder(Confronto, Fst), y = Fst, fill = Confronto)) +
+  geom_col(alpha = 0.8) +
+  geom_text(aes(label = round(Fst, 4)), vjust = -0.5, size = 4) +
+  labs(title = "Confronto Valori Fst tra Popolazioni 1000 Genomes",
+       x = "Confronto tra Popolazioni", 
+       y = "Fst medio") +
+  theme_minimal() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values = c("steelblue", "darkgreen", "orange"))
+
+print(plot_fst_comparison)
+
+# ===========================
+# 7. RIASSUNTO FINALE ESTESO
+# ===========================
+
+cat("\n=== RIASSUNTO COMPLETO ANALISI ===\n")
+cat("Popolazioni 1000 Genomes studiate:\n")
+cat("- IBS: Iberi (Spagna) - Europa\n")
+cat("- MXL: Messicani (Los Angeles) - America\n")
+cat("- CHB: Cinesi Han (Pechino) - Asia\n")
+cat("Numero SNP analizzati:", nrow(IBS_freq), "\n\n")
+
+cat("Diversità genetica tra popolazioni (Fst):\n")
+cat("- Più simili: IBS vs MXL (", round(fst_medio_IBS_MXL, 4), ") - Europa-America\n")
+cat("- Intermedie: IBS vs CHB (", round(fst_medio_IBS_CHB, 4), ") - Europa-Asia\n") 
+cat("- Più diverse: MXL vs CHB (", round(fst_medio_MXL_CHB, 4), ") - America-Asia\n\n")
+
+cat("Interpretazione biogeografica:\n")
+if(fst_medio_IBS_CHB > fst_medio_IBS_MXL) {
+  cat("- La popolazione europea (IBS) è più simile alla popolazione americana (MXL)\n")
+  cat("  rispetto a quella asiatica (CHB), probabilmente per effetti migratori storici\n")
+}
+
+cat("\nInbreeding medio per popolazione:\n")
+for(i in 1:nrow(stats_inbreeding)) {
+  cat("- ", stats_inbreeding$FID[i], ": ", round(stats_inbreeding$media_F[i], 4), "\n")
+}
+
+# Salvataggio grafici
+cat("\n=== SALVATAGGIO GRAFICI ===\n")
+cat("Decommentare le righe seguenti per salvare i grafici:\n")
+cat("# ggsave('PCA_PC1_PC2.png', plot1, width = 10, height = 8)\n")
+cat("# ggsave('PCA_PC1_PC3.png', plot2, width = 10, height = 8)\n")
+cat("# ggsave('Inbreeding_boxplot.png', plot3, width = 10, height = 6)\n")
+cat("# ggsave('RoH_boxplot.png', plot4, width = 10, height = 6)\n")
+cat("# ggsave('Manhattan_IBS_MXL.png', plot_manhattan_1, width = 16, height = 10)\n")
+cat("# ggsave('Manhattan_IBS_CHB.png', plot_manhattan_2, width = 16, height = 10)\n")
+cat("# ggsave('Manhattan_MXL_CHB.png', plot_manhattan_3, width = 16, height = 10)\n")
+cat("# ggsave('Fst_comparison.png', plot_fst_comparison, width = 12, height = 8)\n")
+
+# Salvataggio dati (opzionale)
+# write.csv(top_IBS_MXL, "top_SNP_IBS_MXL.csv", row.names = FALSE)
+# write.csv(top_IBS_CHB, "top_SNP_IBS_CHB.csv", row.names = FALSE) 
+# write.csv(top_MXL_CHB, "top_SNP_MXL_CHB.csv", row.names = FALSE)
